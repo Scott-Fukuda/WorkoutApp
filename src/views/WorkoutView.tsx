@@ -22,7 +22,7 @@ const RING_C = 2 * Math.PI * RING_R
 
 interface SetRow { reps: string; weight: string; logged: boolean; loggedSetId?: string }
 interface SlotState { exercise: Exercise; expanded: boolean; rows: SetRow[] }
-type PrevMap = Record<string, { weight: number; reps: number } | null>
+type PrevMap = Record<string, { weight: number | null; reps: number | null } | null>
 
 function fmtElapsed(s: number) {
   const m = Math.floor(s / 60)
@@ -52,26 +52,52 @@ export default function WorkoutView() {
   const restEnabled = restDuration > 0
   const [restSecs, setRestSecs] = useState(0)
 
-  // Workout elapsed ticker
+  const restStorageKey = sessionId ? `rest_end_${sessionId}` : null
+
+  // Workout elapsed — derived from real start time so reload/reopen stays accurate
   useEffect(() => {
-    const t = setInterval(() => setWorkoutSecs(s => s + 1), 1000)
+    if (!session?.started_at) return
+    const startMs = new Date(session.started_at).getTime()
+    const tick = () => setWorkoutSecs(Math.floor((Date.now() - startMs) / 1000))
+    tick()
+    const t = setInterval(tick, 1000)
     return () => clearInterval(t)
-  }, [])
+  }, [session?.started_at])
+
+  // Rest — restore from localStorage on mount in case app was closed mid-rest
+  useEffect(() => {
+    if (!restStorageKey) return
+    const stored = localStorage.getItem(restStorageKey)
+    if (stored) {
+      const remaining = Math.ceil((Number(stored) - Date.now()) / 1000)
+      if (remaining > 0) setRestSecs(remaining)
+      else localStorage.removeItem(restStorageKey)
+    }
+  }, [restStorageKey])
 
   // Rest countdown ticker
   useEffect(() => {
     if (restSecs <= 0) return
-    const t = setTimeout(() => setRestSecs(s => s - 1), 1000)
+    const t = setTimeout(() => {
+      setRestSecs(s => {
+        const next = s - 1
+        if (next <= 0 && restStorageKey) localStorage.removeItem(restStorageKey)
+        return next
+      })
+    }, 1000)
     return () => clearTimeout(t)
   }, [restSecs])
 
   function cycleRest() {
     setRestOptionIdx(i => (i + 1) % REST_OPTIONS.length)
-    setRestSecs(0) // reset active rest when changing
+    setRestSecs(0)
+    if (restStorageKey) localStorage.removeItem(restStorageKey)
   }
 
   function startRest() {
-    if (restEnabled) setRestSecs(restDuration)
+    if (!restEnabled) return
+    setRestSecs(restDuration)
+    if (restStorageKey) localStorage.setItem(restStorageKey, String(Date.now() + restDuration * 1000))
   }
 
   // ── Slot init ─────────────────────────────────────────────────────────────
@@ -95,15 +121,19 @@ export default function WorkoutView() {
     })
   }, [day])
 
-  // Previous best per exercise
+  // Previous best per exercise — keyed by exercise_id, includes all alternatives
   useEffect(() => {
     if (!day?.slots) return
-    const ids = day.slots.map(s => s.default_exercise?.id).filter(Boolean) as string[]
-    if (!ids.length) return
+    const ids = new Set<string>()
+    for (const s of day.slots) {
+      if (s.default_exercise?.id) ids.add(s.default_exercise.id)
+      for (const alt of s.alternatives ?? []) ids.add(alt.id)
+    }
+    if (!ids.size) return
     supabase
       .from('logged_sets').select('exercise_id, weight, reps, logged_at')
-      .in('exercise_id', ids).not('weight', 'is', null)
-      .order('logged_at', { ascending: false }).limit(200)
+      .in('exercise_id', [...ids])
+      .order('logged_at', { ascending: false }).limit(500)
       .then(({ data }) => {
         const map: PrevMap = {}
         for (const row of data ?? []) {
@@ -112,6 +142,29 @@ export default function WorkoutView() {
         setPrevMap(map)
       })
   }, [day])
+
+  // Auto-fill rows with previous values once prevMap is loaded
+  useEffect(() => {
+    if (!Object.keys(prevMap).length) return
+    setSlotStates(prev => {
+      const next = { ...prev }
+      for (const [slotId, state] of Object.entries(next)) {
+        const p = prevMap[state.exercise.id]
+        if (!p) continue
+        next[slotId] = {
+          ...state,
+          rows: state.rows.map(row =>
+            row.logged ? row : {
+              ...row,
+              weight: p.weight != null ? String(p.weight) : row.weight,
+              reps: p.reps != null ? String(p.reps) : row.reps,
+            }
+          ),
+        }
+      }
+      return next
+    })
+  }, [prevMap])
 
   // Sync logged sets → row state
   useEffect(() => {
@@ -179,7 +232,21 @@ export default function WorkoutView() {
   }
 
   function swapExercise(slot: WorkoutSlot, exercise: Exercise) {
-    setSlotStates(prev => ({ ...prev, [slot.id]: { ...prev[slot.id], exercise } }))
+    const p = prevMap[exercise.id]
+    setSlotStates(prev => ({
+      ...prev,
+      [slot.id]: {
+        ...prev[slot.id],
+        exercise,
+        rows: prev[slot.id].rows.map(row =>
+          row.logged ? row : {
+            ...row,
+            weight: p?.weight != null ? String(p.weight) : '',
+            reps: p?.reps != null ? String(p.reps) : '',
+          }
+        ),
+      },
+    }))
     setSwapSlotId(null)
   }
 
@@ -248,7 +315,17 @@ export default function WorkoutView() {
                   <div>
                     <span style={styles.exName}>{exercise?.name}</span>
                     {isSwapped && <span style={styles.swappedBadge}>swapped</span>}
-                    {prev && <div style={styles.prevLabel}>Previous: {prev.weight} lbs × {prev.reps}</div>}
+                    {prev && (
+                      <div style={styles.prevLabel}>
+                        {exercise?.tracking_type === 'duration'
+                          ? `Previous: ${fmtSeconds(prev.reps ?? 0)}`
+                          : exercise?.tracking_type === 'sets_reps'
+                          ? `Previous: ${prev.reps} reps`
+                          : prev.weight != null
+                          ? `Previous: ${prev.weight} lbs × ${prev.reps}`
+                          : `Previous: ${prev.reps} reps`}
+                      </div>
+                    )}
                   </div>
                 </div>
                 <ChevronDown size={16} color="#6b7280" style={{ transform: isExpanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s', flexShrink: 0 }} />
@@ -313,7 +390,10 @@ export default function WorkoutView() {
             <div style={styles.restInfo}>
               <div style={styles.restLabel}>Rest</div>
               <div style={styles.restSub}>Next set in {fmtSeconds(restSecs)}</div>
-              <button style={styles.skipBtn} onClick={() => setRestSecs(0)}>Skip Rest</button>
+              <button style={styles.skipBtn} onClick={() => {
+                setRestSecs(0)
+                if (restStorageKey) localStorage.removeItem(restStorageKey)
+              }}>Skip Rest</button>
             </div>
           </div>
         </div>
@@ -324,7 +404,7 @@ export default function WorkoutView() {
 
 function SetTable({ slot, exercise, rows, prev, onUpdate, onLog, onUnlog }: {
   slot: WorkoutSlot; exercise: Exercise | undefined; rows: SetRow[]
-  prev: { weight: number; reps: number } | null
+  prev: { weight: number | null; reps: number | null } | null
   onUpdate: (i: number, field: 'reps' | 'weight', value: string) => void
   onLog: (i: number) => void; onUnlog: (i: number) => void
 }) {
@@ -335,9 +415,9 @@ function SetTable({ slot, exercise, rows, prev, onUpdate, onLog, onUnlog }: {
 
   function prevLabel() {
     if (!prev) return '—'
-    if (isDuration) return fmtSeconds(prev.reps)
-    if (hasWeight) return `${prev.weight}×${prev.reps}`
-    return `${prev.reps}`
+    if (isDuration) return fmtSeconds(prev.reps ?? 0)
+    if (hasWeight) return prev.weight != null ? `${prev.weight}×${prev.reps}` : `${prev.reps}`
+    return `${prev.reps ?? '—'}`
   }
 
   return (
