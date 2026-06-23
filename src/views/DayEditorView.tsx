@@ -26,7 +26,7 @@ const CATEGORY_LABELS: Record<string, string> = {
 export default function DayEditorView() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
-  const { programs, loading, addSlot, deleteSlot, reorderSlots, addAlternative, removeAlternative } = usePrograms()
+  const { programs, loading, addSlot, deleteSlot, updateSlot, reorderSlots, addAlternative, removeAlternative } = usePrograms()
   const { exercises } = useExercises()
 
   const day = programs.flatMap(p => p.days ?? []).find(d => d.id === id)
@@ -37,6 +37,9 @@ export default function DayEditorView() {
   const [setsInput, setSetsInput] = useState('3')
   const [repsInput, setRepsInput] = useState('10')
   const [altSlotId, setAltSlotId] = useState<string | null>(null)
+  const [editingSlotId, setEditingSlotId] = useState<string | null>(null)
+  const [editSets, setEditSets] = useState('')
+  const [editReps, setEditReps] = useState('')
   const [startingWorkout, setStartingWorkout] = useState(false)
   const [localSlots, setLocalSlots] = useState<WorkoutSlot[] | null>(null)
   const dragIdx = useRef<number | null>(null)
@@ -136,12 +139,47 @@ export default function DayEditorView() {
                 <span style={{ ...styles.dot, background: color }} />
                 <div style={styles.slotInfo}>
                   <span style={styles.slotName}>{ex?.name ?? 'Unknown'}</span>
-                  <span style={styles.slotMeta}>
-                    {slot.sets_target} sets × {slot.reps_target} reps
-                    {ex?.movement_category && (
-                      <span style={styles.catBadge}>{CATEGORY_LABELS[ex.movement_category] ?? ex.movement_category}</span>
-                    )}
-                  </span>
+                  {editingSlotId === slot.id ? (
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '6px' }}>
+                      <input
+                        style={styles.inlineNumInput}
+                        type="number" inputMode="numeric" min="1" max="10"
+                        value={editSets}
+                        onChange={e => setEditSets(e.target.value)}
+                        onClick={e => e.stopPropagation()}
+                      />
+                      <span style={{ color: '#6b7280', fontSize: '13px' }}>×</span>
+                      <input
+                        style={styles.inlineNumInput}
+                        type="number" inputMode="numeric" min="1" max="100"
+                        value={editReps}
+                        onChange={e => setEditReps(e.target.value)}
+                        onClick={e => e.stopPropagation()}
+                      />
+                      <button style={styles.inlineSave} onClick={async e => {
+                        e.stopPropagation()
+                        const s = parseInt(editSets) || slot.sets_target
+                        const r = parseInt(editReps) || slot.reps_target
+                        await updateSlot(slot.id, s, r)
+                        setEditingSlotId(null)
+                      }}>✓</button>
+                      <button style={styles.inlineCancel} onClick={e => { e.stopPropagation(); setEditingSlotId(null) }}>✕</button>
+                    </span>
+                  ) : (
+                    <span style={styles.slotMeta}>
+                      <button style={styles.setsRepsBtn} onClick={e => {
+                        e.stopPropagation()
+                        setEditingSlotId(slot.id)
+                        setEditSets(String(slot.sets_target))
+                        setEditReps(String(slot.reps_target))
+                      }}>
+                        {slot.sets_target} sets × {slot.reps_target} reps
+                      </button>
+                      {ex?.movement_category && (
+                        <span style={styles.catBadge}>{CATEGORY_LABELS[ex.movement_category] ?? ex.movement_category}</span>
+                      )}
+                    </span>
+                  )}
                 </div>
                 <button style={styles.iconSmall} onClick={() => setAltSlotId(altSlotId === slot.id ? null : slot.id)} title="Add swap alternatives">
                   <RefreshCw size={14} />
@@ -291,4 +329,8 @@ const styles: Record<string, React.CSSProperties> = {
   cancelBtn: { flex: 1, padding: '10px', borderRadius: '8px', border: '1px solid #374151', background: 'none', color: '#9ca3af', cursor: 'pointer' },
   saveBtn: { flex: 1, padding: '10px', borderRadius: '8px', border: 'none', background: '#3b82f6', color: '#fff', fontWeight: 600, cursor: 'pointer' },
   addSlotBtn: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', width: '100%', padding: '14px', borderRadius: '12px', border: '2px dashed #374151', background: 'none', color: '#6b7280', fontSize: '15px', cursor: 'pointer' },
+  setsRepsBtn: { background: 'none', border: 'none', color: '#9ca3af', cursor: 'pointer', padding: '0', fontSize: '12px', textDecoration: 'underline dotted', textUnderlineOffset: '3px' },
+  inlineNumInput: { width: '44px', padding: '4px 6px', borderRadius: '6px', border: '1px solid #374151', background: '#111827', color: '#f9fafb', fontSize: '13px', textAlign: 'center' as const, fontWeight: 700 },
+  inlineSave: { background: '#16a34a', border: 'none', borderRadius: '6px', padding: '4px 8px', color: '#fff', cursor: 'pointer', fontSize: '13px', fontWeight: 700 },
+  inlineCancel: { background: '#374151', border: 'none', borderRadius: '6px', padding: '4px 8px', color: '#9ca3af', cursor: 'pointer', fontSize: '13px' },
 }

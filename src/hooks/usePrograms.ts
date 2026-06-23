@@ -93,6 +93,13 @@ export function usePrograms() {
     await load()
   }
 
+  async function updateSlot(id: string, sets_target: number, reps_target: number) {
+    const { error } = await supabase
+      .from('workout_slots').update({ sets_target, reps_target }).eq('id', id)
+    if (!error) await load()
+    return { error }
+  }
+
   async function reorderSlots(orderedIds: string[]) {
     await Promise.all(
       orderedIds.map((id, i) =>
@@ -117,7 +124,7 @@ export function usePrograms() {
     programs, loading, load,
     createProgram, deleteProgram,
     addDay, deleteDay,
-    addSlot, deleteSlot, reorderSlots,
+    addSlot, deleteSlot, updateSlot, reorderSlots,
     addAlternative, removeAlternative,
   }
 }

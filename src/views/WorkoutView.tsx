@@ -22,7 +22,8 @@ const RING_C = 2 * Math.PI * RING_R
 
 interface SetRow { reps: string; weight: string; logged: boolean; loggedSetId?: string }
 interface SlotState { exercise: Exercise; expanded: boolean; rows: SetRow[] }
-type PrevMap = Record<string, { weight: number | null; reps: number | null } | null>
+type SetHistory = { weight: number | null; reps: number | null } | null
+type PrevMap = Record<string, SetHistory[] | null>
 
 function fmtElapsed(s: number) {
   const m = Math.floor(s / 60)
@@ -50,9 +51,15 @@ export default function WorkoutView() {
   const [restOptionIdx, setRestOptionIdx] = useState(2) // default 90s
   const restDuration = REST_OPTIONS[restOptionIdx]
   const restEnabled = restDuration > 0
-  const [restSecs, setRestSecs] = useState(0)
+  const [activeRest, setActiveRest] = useState<{ endTime: number; duration: number } | null>(null)
+  const [, setRestTick] = useState(0) // drives re-renders during countdown
 
   const restStorageKey = sessionId ? `rest_end_${sessionId}` : null
+
+  // Derived rest values — always computed from real end time, never drift
+  const restSecs = activeRest ? Math.max(0, Math.ceil((activeRest.endTime - Date.now()) / 1000)) : 0
+  const restProgress = activeRest ? restSecs / activeRest.duration : 0
+  const ringColor = restProgress > 0.5 ? '#22c55e' : restProgress > 0.25 ? '#eab308' : '#ef4444'
 
   // Workout elapsed — derived from real start time so reload/reopen stays accurate
   useEffect(() => {
@@ -64,40 +71,44 @@ export default function WorkoutView() {
     return () => clearInterval(t)
   }, [session?.started_at])
 
-  // Rest — restore from localStorage on mount in case app was closed mid-rest
+  // Rest — interval fires every 500ms; clears when expired to stop ticking
+  useEffect(() => {
+    if (!activeRest) return
+    const t = setInterval(() => {
+      if (Date.now() >= activeRest.endTime) {
+        setActiveRest(null)
+        if (restStorageKey) localStorage.removeItem(restStorageKey)
+      } else {
+        setRestTick(n => n + 1)
+      }
+    }, 500)
+    return () => clearInterval(t)
+  }, [activeRest, restStorageKey])
+
+  // Restore rest from localStorage if app was closed mid-rest
   useEffect(() => {
     if (!restStorageKey) return
     const stored = localStorage.getItem(restStorageKey)
     if (stored) {
-      const remaining = Math.ceil((Number(stored) - Date.now()) / 1000)
-      if (remaining > 0) setRestSecs(remaining)
-      else localStorage.removeItem(restStorageKey)
+      try {
+        const { endTime, duration } = JSON.parse(stored)
+        if (endTime > Date.now()) setActiveRest({ endTime, duration })
+        else localStorage.removeItem(restStorageKey)
+      } catch { localStorage.removeItem(restStorageKey) }
     }
   }, [restStorageKey])
 
-  // Rest countdown ticker
-  useEffect(() => {
-    if (restSecs <= 0) return
-    const t = setTimeout(() => {
-      setRestSecs(s => {
-        const next = s - 1
-        if (next <= 0 && restStorageKey) localStorage.removeItem(restStorageKey)
-        return next
-      })
-    }, 1000)
-    return () => clearTimeout(t)
-  }, [restSecs])
-
   function cycleRest() {
     setRestOptionIdx(i => (i + 1) % REST_OPTIONS.length)
-    setRestSecs(0)
+    setActiveRest(null)
     if (restStorageKey) localStorage.removeItem(restStorageKey)
   }
 
   function startRest() {
     if (!restEnabled) return
-    setRestSecs(restDuration)
-    if (restStorageKey) localStorage.setItem(restStorageKey, String(Date.now() + restDuration * 1000))
+    const endTime = Date.now() + restDuration * 1000
+    setActiveRest({ endTime, duration: restDuration })
+    if (restStorageKey) localStorage.setItem(restStorageKey, JSON.stringify({ endTime, duration: restDuration }))
   }
 
   // ── Slot init ─────────────────────────────────────────────────────────────
@@ -121,7 +132,7 @@ export default function WorkoutView() {
     })
   }, [day])
 
-  // Previous best per exercise — keyed by exercise_id, includes all alternatives
+  // Per-set history from last session — keyed by exercise_id, includes all alternatives
   useEffect(() => {
     if (!day?.slots) return
     const ids = new Set<string>()
@@ -131,35 +142,50 @@ export default function WorkoutView() {
     }
     if (!ids.size) return
     supabase
-      .from('logged_sets').select('exercise_id, weight, reps, logged_at')
+      .from('logged_sets')
+      .select('exercise_id, set_number, weight, reps, session_id, logged_at')
       .in('exercise_id', [...ids])
-      .order('logged_at', { ascending: false }).limit(500)
+      .order('logged_at', { ascending: false })
+      .limit(1000)
       .then(({ data }) => {
+        // Find most recent session_id per exercise, then collect that session's sets
+        const latestSession: Record<string, string> = {}
+        for (const row of data ?? []) {
+          if (!latestSession[row.exercise_id]) latestSession[row.exercise_id] = row.session_id
+        }
         const map: PrevMap = {}
         for (const row of data ?? []) {
-          if (!map[row.exercise_id]) map[row.exercise_id] = { weight: row.weight, reps: row.reps }
+          if (row.session_id !== latestSession[row.exercise_id]) continue
+          if (!map[row.exercise_id]) map[row.exercise_id] = []
+          const arr = map[row.exercise_id]!
+          const idx = row.set_number - 1
+          while (arr.length <= idx) arr.push(null)
+          if (arr[idx] === null) arr[idx] = { weight: row.weight, reps: row.reps }
         }
         setPrevMap(map)
       })
   }, [day])
 
-  // Auto-fill rows with previous values once prevMap is loaded
+  // Auto-fill rows with per-set prev values once history loads
   useEffect(() => {
     if (!Object.keys(prevMap).length) return
     setSlotStates(prev => {
       const next = { ...prev }
       for (const [slotId, state] of Object.entries(next)) {
-        const p = prevMap[state.exercise.id]
-        if (!p) continue
+        const history = prevMap[state.exercise.id]
+        if (!history?.length) continue
         next[slotId] = {
           ...state,
-          rows: state.rows.map(row =>
-            row.logged ? row : {
+          rows: state.rows.map((row, idx) => {
+            if (row.logged) return row
+            const setData = history[idx] ?? history[history.length - 1]
+            if (!setData) return row
+            return {
               ...row,
-              weight: p.weight != null ? String(p.weight) : row.weight,
-              reps: p.reps != null ? String(p.reps) : row.reps,
+              weight: setData.weight != null ? String(setData.weight) : row.weight,
+              reps: setData.reps != null ? String(setData.reps) : row.reps,
             }
-          ),
+          }),
         }
       }
       return next
@@ -232,19 +258,21 @@ export default function WorkoutView() {
   }
 
   function swapExercise(slot: WorkoutSlot, exercise: Exercise) {
-    const p = prevMap[exercise.id]
+    const history = prevMap[exercise.id]
     setSlotStates(prev => ({
       ...prev,
       [slot.id]: {
         ...prev[slot.id],
         exercise,
-        rows: prev[slot.id].rows.map(row =>
-          row.logged ? row : {
+        rows: prev[slot.id].rows.map((row, idx) => {
+          if (row.logged) return row
+          const setData = history?.[idx] ?? history?.[history.length - 1]
+          return {
             ...row,
-            weight: p?.weight != null ? String(p.weight) : '',
-            reps: p?.reps != null ? String(p.reps) : '',
+            weight: setData?.weight != null ? String(setData.weight) : '',
+            reps: setData?.reps != null ? String(setData.reps) : '',
           }
-        ),
+        }),
       },
     }))
     setSwapSlotId(null)
@@ -255,10 +283,6 @@ export default function WorkoutView() {
     await finishSession()
     navigate('/history')
   }
-
-  // Rest ring math
-  const restProgress = restDuration > 0 ? restSecs / restDuration : 0
-  const ringColor = restProgress > 0.5 ? '#22c55e' : restProgress > 0.25 ? '#eab308' : '#ef4444'
 
   return (
     <div style={styles.page}>
@@ -294,7 +318,8 @@ export default function WorkoutView() {
           const exercise = state?.exercise ?? slot.default_exercise
           const isSwapped = exercise?.id !== slot.default_exercise_id
           const color = MUSCLE_COLORS[exercise?.muscle_group ?? ''] ?? '#6b7280'
-          const prev = prevMap[exercise?.id ?? '']
+          const prevHistory = prevMap[exercise?.id ?? ''] ?? null
+          const firstPrev = prevHistory?.[0] ?? null
           const isExpanded = state?.expanded !== false
           const rows = state?.rows ?? []
           const swapCandidates = exercises.filter(e =>
@@ -315,17 +340,20 @@ export default function WorkoutView() {
                   <div>
                     <span style={styles.exName}>{exercise?.name}</span>
                     {isSwapped && <span style={styles.swappedBadge}>swapped</span>}
-                    {prev && (
-                      <div style={styles.prevLabel}>
-                        {exercise?.tracking_type === 'duration'
-                          ? `Previous: ${fmtSeconds(prev.reps ?? 0)}`
-                          : exercise?.tracking_type === 'sets_reps'
-                          ? `Previous: ${prev.reps} reps`
-                          : prev.weight != null
-                          ? `Previous: ${prev.weight} lbs × ${prev.reps}`
-                          : `Previous: ${prev.reps} reps`}
-                      </div>
-                    )}
+                    <div style={styles.prevLabel}>
+                      <span style={{ color: '#6b7280' }}>Target: {slot.sets_target}×{slot.reps_target}{exercise?.tracking_type === 'duration' ? 's' : ''}</span>
+                      {firstPrev && (
+                        <span style={{ marginLeft: 8 }}>
+                          {exercise?.tracking_type === 'duration'
+                            ? `· Last: ${fmtSeconds(firstPrev.reps ?? 0)}`
+                            : exercise?.tracking_type === 'sets_reps'
+                            ? `· Last: ${firstPrev.reps} reps`
+                            : firstPrev.weight != null
+                            ? `· Last: ${firstPrev.weight}×${firstPrev.reps}`
+                            : `· Last: ${firstPrev.reps} reps`}
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
                 <ChevronDown size={16} color="#6b7280" style={{ transform: isExpanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s', flexShrink: 0 }} />
@@ -348,7 +376,7 @@ export default function WorkoutView() {
                   )}
 
                   <SetTable
-                    slot={slot} exercise={exercise} rows={rows} prev={prev ?? null}
+                    slot={slot} exercise={exercise} rows={rows} prevHistory={prevHistory}
                     onUpdate={(i, f, v) => updateRow(slot.id, i, f, v)}
                     onLog={i => logRow(slot, i)}
                     onUnlog={i => unlogRow(slot, i)}
@@ -391,7 +419,7 @@ export default function WorkoutView() {
               <div style={styles.restLabel}>Rest</div>
               <div style={styles.restSub}>Next set in {fmtSeconds(restSecs)}</div>
               <button style={styles.skipBtn} onClick={() => {
-                setRestSecs(0)
+                setActiveRest(null)
                 if (restStorageKey) localStorage.removeItem(restStorageKey)
               }}>Skip Rest</button>
             </div>
@@ -402,9 +430,9 @@ export default function WorkoutView() {
   )
 }
 
-function SetTable({ slot, exercise, rows, prev, onUpdate, onLog, onUnlog }: {
+function SetTable({ slot, exercise, rows, prevHistory, onUpdate, onLog, onUnlog }: {
   slot: WorkoutSlot; exercise: Exercise | undefined; rows: SetRow[]
-  prev: { weight: number | null; reps: number | null } | null
+  prevHistory: SetHistory[] | null
   onUpdate: (i: number, field: 'reps' | 'weight', value: string) => void
   onLog: (i: number) => void; onUnlog: (i: number) => void
 }) {
@@ -413,11 +441,13 @@ function SetTable({ slot, exercise, rows, prev, onUpdate, onLog, onUnlog }: {
   const hasWeight = type === 'sets_reps_weight'
   const gridCols = isDuration ? '32px 1fr 1fr 36px' : hasWeight ? '32px 1fr 1fr 1fr 36px' : '32px 1fr 1fr 36px'
 
-  function prevLabel() {
-    if (!prev) return '—'
-    if (isDuration) return fmtSeconds(prev.reps ?? 0)
-    if (hasWeight) return prev.weight != null ? `${prev.weight}×${prev.reps}` : `${prev.reps}`
-    return `${prev.reps ?? '—'}`
+  function prevLabel(i: number) {
+    // Use this set's history; fall back to last known set if beyond previous session length
+    const p = prevHistory?.[i] ?? prevHistory?.[prevHistory.length - 1] ?? null
+    if (!p) return '—'
+    if (isDuration) return fmtSeconds(p.reps ?? 0)
+    if (hasWeight) return p.weight != null ? `${p.weight}×${p.reps}` : `${p.reps}`
+    return `${p.reps ?? '—'}`
   }
 
   return (
@@ -434,7 +464,7 @@ function SetTable({ slot, exercise, rows, prev, onUpdate, onLog, onUnlog }: {
       {rows.map((row, i) => (
         <div key={i} style={{ ...styles.setRow, gridTemplateColumns: gridCols, background: row.logged ? '#14532d22' : 'transparent' }}>
           <span style={{ ...styles.colSet, color: row.logged ? '#4ade80' : '#9ca3af' }}>{i + 1}</span>
-          <span style={styles.colPrev}>{prevLabel()}</span>
+          <span style={styles.colPrev}>{prevLabel(i)}</span>
 
           {isDuration ? (
             <input style={{ ...styles.setInput, opacity: row.logged ? 0.5 : 1 }}

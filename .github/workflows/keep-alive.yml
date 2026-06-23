@@ -1,0 +1,50 @@
+name: Keep Supabase DB alive
+
+on:
+  schedule:
+    - cron: '0 10 * * 0,5'   # Sundays and Fridays at 10:00 UTC
+  workflow_dispatch:           # allow manual trigger
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Query exercises
+        run: |
+          curl -sf \
+            -H "apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            "${{ secrets.SUPABASE_URL }}/rest/v1/exercises?select=id,name,muscle_group,tracking_type&limit=100" \
+            | wc -c
+
+      - name: Query programs with days and slots
+        run: |
+          curl -sf \
+            -H "apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            "${{ secrets.SUPABASE_URL }}/rest/v1/programs?select=id,name,days:workout_days(id,name,slots:workout_slots(id,sets_target,reps_target))&limit=50" \
+            | wc -c
+
+      - name: Query recent workout sessions
+        run: |
+          curl -sf \
+            -H "apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            "${{ secrets.SUPABASE_URL }}/rest/v1/workout_sessions?select=id,day_id,started_at,finished_at&order=started_at.desc&limit=50" \
+            | wc -c
+
+      - name: Query logged sets
+        run: |
+          curl -sf \
+            -H "apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            "${{ secrets.SUPABASE_URL }}/rest/v1/logged_sets?select=id,exercise_id,weight,reps,set_number&order=logged_at.desc&limit=200" \
+            | wc -c
+
+      - name: Query slot alternatives
+        run: |
+          curl -sf \
+            -H "apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            "${{ secrets.SUPABASE_URL }}/rest/v1/slot_alternatives?select=slot_id,exercise_id&limit=100" \
+            | wc -c
