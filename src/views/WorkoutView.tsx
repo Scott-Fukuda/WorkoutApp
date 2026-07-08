@@ -607,27 +607,192 @@ function SwapPicker({ slot, currentExerciseId, autoCandidates, onSwap, onClose }
   )
 }
 
+// ── Exercise history chart ────────────────────────────────────────────────────
+
+interface ChartPoint { x: number; y: number; value: number; shortDate: string }
+
+function HistoryChart({ points, yMin, yMax, yLabel, hoveredIdx, onHover }: {
+  points: ChartPoint[]; yMin: number; yMax: number; yLabel: string
+  hoveredIdx: number | null; onHover: (i: number | null) => void
+}) {
+  const W = 320, H = 148
+  const PAD = { l: 42, r: 14, t: 18, b: 26 }
+  const plotW = W - PAD.l - PAD.r
+  const plotH = H - PAD.t - PAD.b
+
+  const BLUE = '#60a5fa', SURFACE = '#1f2937', GRID = '#374151', MUTED = '#6b7280'
+
+  const linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ')
+  const areaPath = `${linePath}L${points[points.length - 1].x},${PAD.t + plotH}L${PAD.l},${PAD.t + plotH}Z`
+
+  const yTicks = [0, 1, 2, 3].map(i => yMin + (i / 3) * (yMax - yMin))
+  const showX = (i: number) => points.length <= 5 || i === 0 || i === points.length - 1 || (points.length <= 9 && i % 2 === 0)
+  const last = points[points.length - 1]
+  const hov = hoveredIdx != null ? points[hoveredIdx] : null
+
+  return (
+    <div style={{ position: 'relative', padding: '0 16px 4px' }}>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', display: 'block' }}>
+        {/* Y gridlines + labels */}
+        {yTicks.map((v, i) => {
+          const cy = PAD.t + plotH - ((v - yMin) / (yMax - yMin)) * plotH
+          return (
+            <g key={i}>
+              <line x1={PAD.l} y1={cy} x2={W - PAD.r} y2={cy} stroke={GRID} strokeWidth="1" />
+              <text x={PAD.l - 5} y={cy + 4} textAnchor="end" fill={MUTED} fontSize="10" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                {Math.round(v)}
+              </text>
+            </g>
+          )
+        })}
+
+        {/* Unit label */}
+        <text x={PAD.l - 5} y={PAD.t - 5} textAnchor="end" fill={MUTED} fontSize="9">{yLabel}</text>
+
+        {/* Area fill — series hue at 10% */}
+        <path d={areaPath} fill={BLUE} fillOpacity="0.10" />
+
+        {/* 2px line, round joins */}
+        <path d={linePath} fill="none" stroke={BLUE} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+
+        {/* Dots: surface ring (r=7) then filled dot (r=5) */}
+        {points.map((p, i) => (
+          <g key={i}>
+            <circle cx={p.x} cy={p.y} r={7} fill={SURFACE} />
+            <circle cx={p.x} cy={p.y} r={5} fill={BLUE} />
+          </g>
+        ))}
+
+        {/* Hovered state: larger ring + vertical crosshair */}
+        {hov && (
+          <g>
+            <line x1={hov.x} y1={PAD.t} x2={hov.x} y2={PAD.t + plotH} stroke={BLUE} strokeWidth="1" strokeDasharray="3 2" opacity="0.35" />
+            <circle cx={hov.x} cy={hov.y} r={9} fill={SURFACE} />
+            <circle cx={hov.x} cy={hov.y} r={6} fill={BLUE} />
+          </g>
+        )}
+
+        {/* Direct label on most-recent point only */}
+        <text
+          x={last.x} y={last.y - 11}
+          textAnchor={last.x > W - PAD.r - 24 ? 'end' : 'middle'}
+          fill="#f9fafb" fontSize="11" fontWeight="600"
+        >
+          {Math.round(last.value)}
+        </text>
+
+        {/* X axis date labels */}
+        {points.map((p, i) => showX(i) && (
+          <text key={i} x={p.x} y={H - 4} textAnchor="middle" fill={MUTED} fontSize="9">{p.shortDate}</text>
+        ))}
+
+        {/* Wide invisible hit targets */}
+        {points.map((p, i) => (
+          <rect key={i}
+            x={p.x - 22} y={PAD.t} width={44} height={plotH + 4}
+            fill="transparent" style={{ cursor: 'crosshair' }}
+            onMouseEnter={() => onHover(i)} onMouseLeave={() => onHover(null)}
+            onTouchStart={e => { e.preventDefault(); onHover(hoveredIdx === i ? null : i) }}
+          />
+        ))}
+      </svg>
+
+      {/* Floating tooltip */}
+      {hov && (
+        <div style={{
+          position: 'absolute', top: 6,
+          left: `calc(${(hov.x / W) * 100}% - 8px)`,
+          transform: hov.x > W * 0.6 ? 'translateX(-90%)' : 'translateX(-10%)',
+          background: '#374151', border: '1px solid #4b5563', borderRadius: '8px',
+          padding: '5px 10px', fontSize: '12px', color: '#f9fafb',
+          pointerEvents: 'none', whiteSpace: 'nowrap',
+        }}>
+          <div style={{ fontWeight: 700 }}>{Math.round(hov.value)} {yLabel}</div>
+          <div style={{ color: '#9ca3af', fontSize: '11px' }}>{hov.shortDate}</div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ExerciseHistoryModal({ exerciseId, exerciseName, onClose }: {
   exerciseId: string; exerciseName: string; onClose: () => void
 }) {
   const history = useExerciseHistory(exerciseId)
+  const [hoveredIdx, setHoveredIdx] = useState<number | null>(null)
 
-  // Group by session_id, most recent first (history is already ordered desc)
-  const sessions: { sessionId: string; date: string; sets: typeof history }[] = []
+  // Group by session_id, most recent first
+  const sessions: { sessionId: string; date: string; shortDate: string; sets: typeof history }[] = []
   const seen = new Set<string>()
   for (const row of history) {
     if (!seen.has(row.session_id)) {
       seen.add(row.session_id)
-      const started = (row as any).session?.started_at
+      const d = (row as any).session?.started_at ? new Date((row as any).session.started_at) : new Date()
       sessions.push({
         sessionId: row.session_id,
-        date: started ? new Date(started).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Unknown date',
+        date: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        shortDate: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
         sets: [],
       })
     }
     sessions.find(s => s.sessionId === row.session_id)!.sets.push(row)
   }
   for (const s of sessions) s.sets.sort((a, b) => a.set_number - b.set_number)
+
+  // Build chart: last 10 sessions oldest→newest
+  const isWeighted = sessions.some(s => s.sets.some(set => (set as any).weight != null && (set as any).weight > 0))
+  const yLabel = isWeighted ? 'lbs' : 'reps'
+  const chartSessions = sessions.slice(0, 10).reverse()
+
+  let chartPoints: ChartPoint[] = []
+  if (chartSessions.length >= 2) {
+    const W = 320, PAD = { l: 42, r: 14, t: 18, b: 26 }
+    const plotW = W - PAD.l - PAD.r, plotH = 148 - PAD.t - PAD.b
+    const vals = chartSessions.map(s =>
+      Math.max(...s.sets.map(set => isWeighted ? ((set as any).weight ?? 0) : ((set as any).reps ?? 0)))
+    )
+    const rawMin = Math.min(...vals), rawMax = Math.max(...vals)
+    const pad = rawMax - rawMin ? (rawMax - rawMin) * 0.25 : rawMax * 0.2 || 5
+    const yMin = Math.max(0, rawMin - pad), yMax = rawMax + pad
+    chartPoints = chartSessions.map((s, i) => ({
+      x: PAD.l + (chartSessions.length > 1 ? (i / (chartSessions.length - 1)) * plotW : plotW / 2),
+      y: PAD.t + plotH - ((vals[i] - yMin) / (yMax - yMin)) * plotH,
+      value: vals[i],
+      shortDate: s.shortDate,
+      yMin, yMax,
+    } as ChartPoint & { yMin: number; yMax: number }))
+    const { yMin: chartYMin, yMax: chartYMax } = chartPoints[0] as any
+
+    return (
+      <div style={hm.backdrop} onClick={onClose}>
+        <div style={hm.sheet} onClick={e => e.stopPropagation()}>
+          <div style={hm.header}>
+            <span style={hm.title}>{exerciseName}</span>
+            <button style={hm.close} onClick={onClose}><X size={18} /></button>
+          </div>
+          <HistoryChart points={chartPoints} yMin={chartYMin} yMax={chartYMax} yLabel={yLabel} hoveredIdx={hoveredIdx} onHover={setHoveredIdx} />
+          <div style={hm.divider} />
+          <div style={hm.body}>
+            {sessions.map(s => (
+              <div key={s.sessionId} style={hm.session}>
+                <div style={hm.sessionDate}>{s.date}</div>
+                {s.sets.map(set => (
+                  <div key={set.id} style={hm.setLine}>
+                    <span style={hm.setNum}>Set {set.set_number}</span>
+                    <span style={hm.setVal}>
+                      {(set as any).weight != null ? `${(set as any).weight} lbs × ${set.reps} reps`
+                        : set.reps != null ? `${set.reps} reps` : '—'}
+                    </span>
+                    {(set as any).notes && <span style={hm.setNote}>{(set as any).notes}</span>}
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div style={hm.backdrop} onClick={onClose}>
@@ -636,27 +801,25 @@ function ExerciseHistoryModal({ exerciseId, exerciseName, onClose }: {
           <span style={hm.title}>{exerciseName}</span>
           <button style={hm.close} onClick={onClose}><X size={18} /></button>
         </div>
-
         <div style={hm.body}>
-          {sessions.length === 0 && <p style={hm.empty}>No history yet for this exercise.</p>}
-          {sessions.map(s => (
-            <div key={s.sessionId} style={hm.session}>
-              <div style={hm.sessionDate}>{s.date}</div>
-              {s.sets.map(set => (
-                <div key={set.id} style={hm.setLine}>
-                  <span style={hm.setNum}>Set {set.set_number}</span>
-                  <span style={hm.setVal}>
-                    {set.weight != null
-                      ? `${set.weight} lbs × ${set.reps} reps`
-                      : set.reps != null
-                      ? `${set.reps} reps`
-                      : '—'}
-                  </span>
-                  {(set as any).notes && <span style={hm.setNote}>{(set as any).notes}</span>}
-                </div>
-              ))}
-            </div>
-          ))}
+          {sessions.length === 0
+            ? <p style={hm.empty}>No history yet for this exercise.</p>
+            : sessions.map(s => (
+              <div key={s.sessionId} style={hm.session}>
+                <div style={hm.sessionDate}>{s.date}</div>
+                {s.sets.map(set => (
+                  <div key={set.id} style={hm.setLine}>
+                    <span style={hm.setNum}>Set {set.set_number}</span>
+                    <span style={hm.setVal}>
+                      {(set as any).weight != null ? `${(set as any).weight} lbs × ${set.reps} reps`
+                        : set.reps != null ? `${set.reps} reps` : '—'}
+                    </span>
+                    {(set as any).notes && <span style={hm.setNote}>{(set as any).notes}</span>}
+                  </div>
+                ))}
+              </div>
+            ))
+          }
         </div>
       </div>
     </div>
@@ -665,14 +828,15 @@ function ExerciseHistoryModal({ exerciseId, exerciseName, onClose }: {
 
 const hm: Record<string, React.CSSProperties> = {
   backdrop: { position: 'fixed', inset: 0, background: '#00000080', zIndex: 50, display: 'flex', alignItems: 'flex-end' },
-  sheet: { background: '#1f2937', borderRadius: '20px 20px 0 0', width: '100%', maxHeight: '75vh', display: 'flex', flexDirection: 'column' },
-  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 20px', borderBottom: '1px solid #374151' },
+  sheet: { background: '#1f2937', borderRadius: '20px 20px 0 0', width: '100%', maxHeight: '80vh', display: 'flex', flexDirection: 'column' },
+  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 20px 12px', borderBottom: '1px solid #374151' },
   title: { fontWeight: 700, fontSize: '16px', color: '#f9fafb' },
   close: { background: 'none', border: 'none', color: '#9ca3af', cursor: 'pointer', padding: '4px', display: 'flex' },
-  body: { overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '16px' },
+  divider: { height: '1px', background: '#374151', margin: '0 16px' },
+  body: { overflowY: 'auto', padding: '12px 20px 24px', display: 'flex', flexDirection: 'column', gap: '14px' },
   empty: { color: '#6b7280', fontSize: '14px', textAlign: 'center', padding: '20px 0' },
-  session: { display: 'flex', flexDirection: 'column', gap: '6px' },
-  sessionDate: { fontSize: '13px', fontWeight: 700, color: '#60a5fa', marginBottom: '2px' },
+  session: { display: 'flex', flexDirection: 'column', gap: '4px' },
+  sessionDate: { fontSize: '12px', fontWeight: 700, color: '#60a5fa', marginBottom: '2px', textTransform: 'uppercase', letterSpacing: '0.04em' },
   setLine: { display: 'flex', alignItems: 'baseline', gap: '8px', paddingLeft: '8px' },
   setNum: { fontSize: '12px', color: '#6b7280', minWidth: '36px' },
   setVal: { fontSize: '14px', color: '#f9fafb', fontWeight: 500 },
