@@ -30,6 +30,7 @@ export function useActiveSession(sessionId: string | null) {
     reps: number | null
     weight: number | null
     rpe?: number | null
+    notes?: string
   }) {
     if (!sessionId) return
     const { data, error } = await supabase

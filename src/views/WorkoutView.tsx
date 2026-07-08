@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, RefreshCw, Check, Plus, ChevronDown, Timer } from 'lucide-react'
-import { useActiveSession } from '../hooks/useSession'
+import { ArrowLeft, RefreshCw, Check, Plus, ChevronDown, Timer, MessageSquare, BarChart2, X } from 'lucide-react'
+import { useActiveSession, useExerciseHistory } from '../hooks/useSession'
 import { useDay } from '../hooks/usePrograms'
 import { useExercises } from '../hooks/useExercises'
 import { supabase } from '../lib/supabase'
@@ -20,7 +20,7 @@ const REST_LABELS: Record<number, string> = { 0: 'Off', 45: '45s', 60: '1m', 90:
 const RING_R = 44
 const RING_C = 2 * Math.PI * RING_R
 
-interface SetRow { reps: string; weight: string; logged: boolean; loggedSetId?: string }
+interface SetRow { reps: string; weight: string; logged: boolean; loggedSetId?: string; note: string; showNote: boolean }
 interface SlotState { exercise: Exercise; expanded: boolean; rows: SetRow[] }
 type SetHistory = { weight: number | null; reps: number | null } | null
 type PrevMap = Record<string, SetHistory[] | null>
@@ -45,6 +45,8 @@ export default function WorkoutView() {
   const [swapSlotId, setSwapSlotId] = useState<string | null>(null)
   const [finishing, setFinishing] = useState(false)
   const [prevMap, setPrevMap] = useState<PrevMap>({})
+  const [historyExId, setHistoryExId] = useState<string | null>(null)
+  const [historyExName, setHistoryExName] = useState('')
 
   // ── Timers ────────────────────────────────────────────────────────────────
   const [workoutSecs, setWorkoutSecs] = useState(0)
@@ -124,7 +126,7 @@ export default function WorkoutView() {
           exercise: ex,
           expanded: true,
           rows: Array.from({ length: slot.sets_target }, () => ({
-            reps: String(slot.reps_target), weight: '', logged: false,
+            reps: String(slot.reps_target), weight: '', logged: false, note: '', showNote: false,
           })),
         }
       }
@@ -202,7 +204,7 @@ export default function WorkoutView() {
         const rows = next[s.slot_id].rows
         const idx = s.set_number - 1
         if (rows[idx] !== undefined) {
-          rows[idx] = { reps: String(s.reps ?? ''), weight: String(s.weight ?? ''), logged: true, loggedSetId: s.id }
+          rows[idx] = { reps: String(s.reps ?? ''), weight: String(s.weight ?? ''), logged: true, loggedSetId: s.id, note: (s as any).notes ?? '', showNote: false }
         }
       }
       return next
@@ -219,6 +221,22 @@ export default function WorkoutView() {
     })
   }
 
+  function toggleNote(slotId: string, i: number) {
+    setSlotStates(prev => {
+      const rows = [...prev[slotId].rows]
+      rows[i] = { ...rows[i], showNote: !rows[i].showNote }
+      return { ...prev, [slotId]: { ...prev[slotId], rows } }
+    })
+  }
+
+  function updateNote(slotId: string, i: number, note: string) {
+    setSlotStates(prev => {
+      const rows = [...prev[slotId].rows]
+      rows[i] = { ...rows[i], note }
+      return { ...prev, [slotId]: { ...prev[slotId], rows } }
+    })
+  }
+
   async function logRow(slot: WorkoutSlot, i: number) {
     const state = slotStates[slot.id]
     if (!state) return
@@ -227,6 +245,7 @@ export default function WorkoutView() {
       slot_id: slot.id, exercise_id: state.exercise.id, set_number: i + 1,
       reps: row.reps ? parseInt(row.reps) : null,
       weight: row.weight ? parseFloat(row.weight) : null,
+      notes: row.note || undefined,
     })
     if (result && !result.error && result.data) {
       setSlotStates(prev => {
@@ -253,7 +272,7 @@ export default function WorkoutView() {
     setSlotStates(prev => {
       const state = prev[slotId]
       const last = state.rows[state.rows.length - 1]
-      return { ...prev, [slotId]: { ...state, rows: [...state.rows, { reps: last?.reps ?? '', weight: last?.weight ?? '', logged: false }] } }
+      return { ...prev, [slotId]: { ...state, rows: [...state.rows, { reps: last?.reps ?? '', weight: last?.weight ?? '', logged: false, note: '', showNote: false }] } }
     })
   }
 
@@ -361,10 +380,19 @@ export default function WorkoutView() {
 
               {isExpanded && (
                 <div style={styles.cardBody}>
-                  <button style={styles.swapBtn} onClick={() => setSwapSlotId(swapSlotId === slot.id ? null : slot.id)}>
-                    <RefreshCw size={13} />
-                    Swap ({swapCandidates.length + (slot.alternatives?.length ?? 0)} options)
-                  </button>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <button style={styles.swapBtn} onClick={() => setSwapSlotId(swapSlotId === slot.id ? null : slot.id)}>
+                      <RefreshCw size={13} />
+                      Swap ({swapCandidates.length + (slot.alternatives?.length ?? 0)} options)
+                    </button>
+                    <button style={styles.swapBtn} onClick={() => {
+                      setHistoryExId(exercise?.id ?? null)
+                      setHistoryExName(exercise?.name ?? '')
+                    }}>
+                      <BarChart2 size={13} />
+                      History
+                    </button>
+                  </div>
 
                   {swapSlotId === slot.id && (
                     <SwapPicker
@@ -380,6 +408,8 @@ export default function WorkoutView() {
                     onUpdate={(i, f, v) => updateRow(slot.id, i, f, v)}
                     onLog={i => logRow(slot, i)}
                     onUnlog={i => unlogRow(slot, i)}
+                    onNoteToggle={i => toggleNote(slot.id, i)}
+                    onNoteChange={(i, n) => updateNote(slot.id, i, n)}
                   />
 
                   <button style={styles.addSetBtn} onClick={() => addRow(slot.id)}>
@@ -395,6 +425,14 @@ export default function WorkoutView() {
       <div style={{ height: restSecs > 0 ? 200 : 80 }} />
 
       {/* Rest timer overlay */}
+      {historyExId && (
+        <ExerciseHistoryModal
+          exerciseId={historyExId}
+          exerciseName={historyExName}
+          onClose={() => setHistoryExId(null)}
+        />
+      )}
+
       {restSecs > 0 && (
         <div style={styles.restOverlay}>
           <div style={styles.restCard}>
@@ -430,19 +468,19 @@ export default function WorkoutView() {
   )
 }
 
-function SetTable({ slot, exercise, rows, prevHistory, onUpdate, onLog, onUnlog }: {
+function SetTable({ slot, exercise, rows, prevHistory, onUpdate, onLog, onUnlog, onNoteToggle, onNoteChange }: {
   slot: WorkoutSlot; exercise: Exercise | undefined; rows: SetRow[]
   prevHistory: SetHistory[] | null
   onUpdate: (i: number, field: 'reps' | 'weight', value: string) => void
   onLog: (i: number) => void; onUnlog: (i: number) => void
+  onNoteToggle: (i: number) => void; onNoteChange: (i: number, note: string) => void
 }) {
   const type: TrackingType = exercise?.tracking_type ?? 'sets_reps_weight'
   const isDuration = type === 'duration'
   const hasWeight = type === 'sets_reps_weight'
-  const gridCols = isDuration ? '32px 1fr 1fr 36px' : hasWeight ? '32px 1fr 1fr 1fr 36px' : '32px 1fr 1fr 36px'
+  const gridCols = isDuration ? '28px 1fr 1fr 32px 28px' : hasWeight ? '28px 1fr 1fr 1fr 32px 28px' : '28px 1fr 1fr 32px 28px'
 
   function prevLabel(i: number) {
-    // Use this set's history; fall back to last known set if beyond previous session length
     const p = prevHistory?.[i] ?? prevHistory?.[prevHistory.length - 1] ?? null
     if (!p) return '—'
     if (isDuration) return fmtSeconds(p.reps ?? 0)
@@ -459,38 +497,63 @@ function SetTable({ slot, exercise, rows, prevHistory, onUpdate, onLog, onUnlog 
           : hasWeight ? <><span style={styles.colInput}>lbs</span><span style={styles.colInput}>Reps</span></>
           : <span style={styles.colInput}>Reps</span>}
         <span style={styles.colCheck} />
+        <span />
       </div>
 
       {rows.map((row, i) => (
-        <div key={i} style={{ ...styles.setRow, gridTemplateColumns: gridCols, background: row.logged ? '#14532d22' : 'transparent' }}>
-          <span style={{ ...styles.colSet, color: row.logged ? '#4ade80' : '#9ca3af' }}>{i + 1}</span>
-          <span style={styles.colPrev}>{prevLabel(i)}</span>
+        <div key={i}>
+          <div style={{ ...styles.setRow, gridTemplateColumns: gridCols, background: row.logged ? '#14532d22' : 'transparent' }}>
+            <span style={{ ...styles.colSet, color: row.logged ? '#4ade80' : '#9ca3af' }}>{i + 1}</span>
+            <span style={styles.colPrev}>{prevLabel(i)}</span>
 
-          {isDuration ? (
-            <input style={{ ...styles.setInput, opacity: row.logged ? 0.5 : 1 }}
-              type="number" inputMode="numeric" placeholder="—"
-              value={row.reps} onChange={e => onUpdate(i, 'reps', e.target.value)} disabled={row.logged} />
-          ) : hasWeight ? (
-            <>
-              <input style={{ ...styles.setInput, opacity: row.logged ? 0.5 : 1 }}
-                type="number" inputMode="decimal" placeholder="—"
-                value={row.weight} onChange={e => onUpdate(i, 'weight', e.target.value)} disabled={row.logged} />
+            {isDuration ? (
               <input style={{ ...styles.setInput, opacity: row.logged ? 0.5 : 1 }}
                 type="number" inputMode="numeric" placeholder="—"
                 value={row.reps} onChange={e => onUpdate(i, 'reps', e.target.value)} disabled={row.logged} />
-            </>
-          ) : (
-            <input style={{ ...styles.setInput, opacity: row.logged ? 0.5 : 1 }}
-              type="number" inputMode="numeric" placeholder="—"
-              value={row.reps} onChange={e => onUpdate(i, 'reps', e.target.value)} disabled={row.logged} />
-          )}
+            ) : hasWeight ? (
+              <>
+                <input style={{ ...styles.setInput, opacity: row.logged ? 0.5 : 1 }}
+                  type="number" inputMode="decimal" placeholder="—"
+                  value={row.weight} onChange={e => onUpdate(i, 'weight', e.target.value)} disabled={row.logged} />
+                <input style={{ ...styles.setInput, opacity: row.logged ? 0.5 : 1 }}
+                  type="number" inputMode="numeric" placeholder="—"
+                  value={row.reps} onChange={e => onUpdate(i, 'reps', e.target.value)} disabled={row.logged} />
+              </>
+            ) : (
+              <input style={{ ...styles.setInput, opacity: row.logged ? 0.5 : 1 }}
+                type="number" inputMode="numeric" placeholder="—"
+                value={row.reps} onChange={e => onUpdate(i, 'reps', e.target.value)} disabled={row.logged} />
+            )}
 
-          <button
-            style={{ ...styles.checkBtn, background: row.logged ? '#16a34a' : '#374151' }}
-            onClick={() => row.logged ? onUnlog(i) : onLog(i)}
-          >
-            <Check size={14} color={row.logged ? '#fff' : '#9ca3af'} />
-          </button>
+            <button
+              style={{ ...styles.checkBtn, background: row.logged ? '#16a34a' : '#374151' }}
+              onClick={() => row.logged ? onUnlog(i) : onLog(i)}
+            >
+              <Check size={14} color={row.logged ? '#fff' : '#9ca3af'} />
+            </button>
+            <button
+              style={{ ...styles.noteIconBtn, color: row.showNote || row.note ? '#60a5fa' : '#4b5563' }}
+              onClick={() => onNoteToggle(i)}
+              title="Add note"
+            >
+              <MessageSquare size={12} />
+            </button>
+          </div>
+
+          {row.showNote && (
+            <div style={styles.noteExpansion}>
+              {row.logged
+                ? <p style={styles.noteReadOnly}>{row.note || <span style={{ color: '#4b5563' }}>No note</span>}</p>
+                : <textarea
+                    style={styles.noteInput}
+                    placeholder="Add a note for this set…"
+                    value={row.note}
+                    onChange={e => onNoteChange(i, e.target.value)}
+                    rows={2}
+                  />
+              }
+            </div>
+          )}
         </div>
       ))}
     </div>
@@ -503,11 +566,21 @@ function SwapPicker({ slot, currentExerciseId, autoCandidates, onSwap, onClose }
 }) {
   const manualAlts = (slot.alternatives ?? []).filter(a => a.id !== currentExerciseId && !autoCandidates.find(c => c.id === a.id))
   const showDefault = currentExerciseId !== slot.default_exercise_id && slot.default_exercise
-  const allChoices = [
-    ...(showDefault ? [{ ex: slot.default_exercise!, label: 'default' }] : []),
-    ...manualAlts.map(e => ({ ex: e, label: 'pinned' })),
-    ...autoCandidates.map(e => ({ ex: e, label: 'similar' })),
-  ]
+  const hasAny = showDefault || manualAlts.length > 0 || autoCandidates.length > 0
+
+  function Section({ label, color, exercises }: { label: string; color: string; exercises: Exercise[] }) {
+    if (!exercises.length) return null
+    return (
+      <div style={sp.section}>
+        <div style={{ ...sp.sectionLabel, color }}>{label}</div>
+        {exercises.map(ex => (
+          <button key={ex.id} style={sp.choice} onClick={() => onSwap(ex)}>
+            {ex.name}
+          </button>
+        ))}
+      </div>
+    )
+  }
 
   return (
     <div style={sp.panel}>
@@ -515,19 +588,95 @@ function SwapPicker({ slot, currentExerciseId, autoCandidates, onSwap, onClose }
         <span style={sp.title}>Swap exercise</span>
         <button style={sp.close} onClick={onClose}>Cancel</button>
       </div>
-      {allChoices.length === 0
+      {!hasAny
         ? <p style={sp.empty}>No alternatives found for this movement.</p>
-        : allChoices.map(({ ex, label }) => (
-          <button key={ex.id} style={sp.choice} onClick={() => onSwap(ex)}>
-            <span style={sp.choiceName}>{ex.name}</span>
-            <span style={{ ...sp.badge, color: label === 'default' ? '#9ca3af' : label === 'pinned' ? '#60a5fa' : '#a78bfa' }}>
-              {label}
-            </span>
-          </button>
-        ))
+        : <>
+            {showDefault && (
+              <div style={sp.section}>
+                <div style={{ ...sp.sectionLabel, color: '#9ca3af' }}>Default</div>
+                <button style={sp.choice} onClick={() => onSwap(slot.default_exercise!)}>
+                  {slot.default_exercise!.name}
+                </button>
+              </div>
+            )}
+            <Section label="Pinned swaps" color="#60a5fa" exercises={manualAlts} />
+            <Section label="Similar — same movement pattern" color="#a78bfa" exercises={autoCandidates} />
+          </>
       }
     </div>
   )
+}
+
+function ExerciseHistoryModal({ exerciseId, exerciseName, onClose }: {
+  exerciseId: string; exerciseName: string; onClose: () => void
+}) {
+  const history = useExerciseHistory(exerciseId)
+
+  // Group by session_id, most recent first (history is already ordered desc)
+  const sessions: { sessionId: string; date: string; sets: typeof history }[] = []
+  const seen = new Set<string>()
+  for (const row of history) {
+    if (!seen.has(row.session_id)) {
+      seen.add(row.session_id)
+      const started = (row as any).session?.started_at
+      sessions.push({
+        sessionId: row.session_id,
+        date: started ? new Date(started).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Unknown date',
+        sets: [],
+      })
+    }
+    sessions.find(s => s.sessionId === row.session_id)!.sets.push(row)
+  }
+  for (const s of sessions) s.sets.sort((a, b) => a.set_number - b.set_number)
+
+  return (
+    <div style={hm.backdrop} onClick={onClose}>
+      <div style={hm.sheet} onClick={e => e.stopPropagation()}>
+        <div style={hm.header}>
+          <span style={hm.title}>{exerciseName}</span>
+          <button style={hm.close} onClick={onClose}><X size={18} /></button>
+        </div>
+
+        <div style={hm.body}>
+          {sessions.length === 0 && <p style={hm.empty}>No history yet for this exercise.</p>}
+          {sessions.map(s => (
+            <div key={s.sessionId} style={hm.session}>
+              <div style={hm.sessionDate}>{s.date}</div>
+              {s.sets.map(set => (
+                <div key={set.id} style={hm.setLine}>
+                  <span style={hm.setNum}>Set {set.set_number}</span>
+                  <span style={hm.setVal}>
+                    {set.weight != null
+                      ? `${set.weight} lbs × ${set.reps} reps`
+                      : set.reps != null
+                      ? `${set.reps} reps`
+                      : '—'}
+                  </span>
+                  {(set as any).notes && <span style={hm.setNote}>{(set as any).notes}</span>}
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+const hm: Record<string, React.CSSProperties> = {
+  backdrop: { position: 'fixed', inset: 0, background: '#00000080', zIndex: 50, display: 'flex', alignItems: 'flex-end' },
+  sheet: { background: '#1f2937', borderRadius: '20px 20px 0 0', width: '100%', maxHeight: '75vh', display: 'flex', flexDirection: 'column' },
+  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 20px', borderBottom: '1px solid #374151' },
+  title: { fontWeight: 700, fontSize: '16px', color: '#f9fafb' },
+  close: { background: 'none', border: 'none', color: '#9ca3af', cursor: 'pointer', padding: '4px', display: 'flex' },
+  body: { overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '16px' },
+  empty: { color: '#6b7280', fontSize: '14px', textAlign: 'center', padding: '20px 0' },
+  session: { display: 'flex', flexDirection: 'column', gap: '6px' },
+  sessionDate: { fontSize: '13px', fontWeight: 700, color: '#60a5fa', marginBottom: '2px' },
+  setLine: { display: 'flex', alignItems: 'baseline', gap: '8px', paddingLeft: '8px' },
+  setNum: { fontSize: '12px', color: '#6b7280', minWidth: '36px' },
+  setVal: { fontSize: '14px', color: '#f9fafb', fontWeight: 500 },
+  setNote: { fontSize: '12px', color: '#9ca3af', fontStyle: 'italic' },
 }
 
 const styles: Record<string, React.CSSProperties> = {
@@ -558,6 +707,10 @@ const styles: Record<string, React.CSSProperties> = {
   colCheck: {},
   setInput: { background: '#1f2937', border: '1px solid #374151', borderRadius: '6px', color: '#f9fafb', fontSize: '14px', padding: '7px 4px', textAlign: 'center', width: '100%' },
   checkBtn: { width: '32px', height: '32px', borderRadius: '50%', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
+  noteIconBtn: { background: 'none', border: 'none', cursor: 'pointer', padding: '2px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
+  noteExpansion: { padding: '6px 10px 8px', borderBottom: '1px solid #1f2937', background: '#0d1117' },
+  noteInput: { width: '100%', background: '#1f2937', border: '1px solid #374151', borderRadius: '6px', color: '#f9fafb', fontSize: '13px', padding: '8px', resize: 'none', fontFamily: 'inherit', boxSizing: 'border-box' as const },
+  noteReadOnly: { fontSize: '13px', color: '#d1d5db', margin: 0, fontStyle: 'italic' },
   addSetBtn: { display: 'flex', alignItems: 'center', gap: '6px', background: 'none', border: '1px dashed #374151', borderRadius: '8px', padding: '8px 14px', color: '#6b7280', fontSize: '13px', cursor: 'pointer', alignSelf: 'flex-start' },
   // Rest overlay
   restOverlay: { position: 'fixed', bottom: '70px', left: 0, right: 0, display: 'flex', justifyContent: 'center', padding: '0 16px', zIndex: 20, pointerEvents: 'none' },
@@ -569,12 +722,12 @@ const styles: Record<string, React.CSSProperties> = {
 }
 
 const sp: Record<string, React.CSSProperties> = {
-  panel: { background: '#111827', borderRadius: '10px', padding: '12px', display: 'flex', flexDirection: 'column', gap: '6px' },
-  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' },
+  panel: { background: '#111827', borderRadius: '10px', padding: '12px', display: 'flex', flexDirection: 'column', gap: '10px' },
+  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' },
   title: { fontWeight: 600, fontSize: '13px', color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.05em' },
   close: { background: 'none', border: 'none', color: '#60a5fa', cursor: 'pointer', fontSize: '13px' },
-  choice: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#1f2937', border: '1px solid #374151', borderRadius: '8px', padding: '11px 14px', color: '#f9fafb', cursor: 'pointer', fontSize: '14px', fontWeight: 500 },
-  choiceName: { textAlign: 'left' },
-  badge: { fontSize: '11px', fontWeight: 600 },
+  section: { display: 'flex', flexDirection: 'column', gap: '4px' },
+  sectionLabel: { fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', paddingLeft: '2px', paddingBottom: '2px' },
+  choice: { display: 'flex', alignItems: 'center', background: '#1f2937', border: '1px solid #374151', borderRadius: '8px', padding: '11px 14px', color: '#f9fafb', cursor: 'pointer', fontSize: '14px', fontWeight: 500, textAlign: 'left', width: '100%' },
   empty: { color: '#6b7280', fontSize: '13px', textAlign: 'center', padding: '8px' },
 }
