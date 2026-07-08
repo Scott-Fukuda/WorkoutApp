@@ -27,5 +27,11 @@ export function useExercises() {
     return { data, error }
   }
 
-  return { exercises, loading, addExercise }
+  async function updateExerciseNote(id: string, notes: string) {
+    const { error } = await supabase.from('exercises').update({ notes }).eq('id', id)
+    if (!error) setExercises(prev => prev.map(e => e.id === id ? { ...e, notes } : e))
+    return { error }
+  }
+
+  return { exercises, loading, addExercise, updateExerciseNote }
 }

@@ -39,7 +39,9 @@ export default function WorkoutView() {
   const navigate = useNavigate()
   const { session, sets, logSet, deleteSet, finishSession } = useActiveSession(sessionId ?? null)
   const { day, loading } = useDay(session?.day_id)
-  const { exercises } = useExercises()
+  const { exercises, updateExerciseNote } = useExercises()
+  const [editNoteExId, setEditNoteExId] = useState<string | null>(null)
+  const [editNoteText, setEditNoteText] = useState('')
 
   const [slotStates, setSlotStates] = useState<Record<string, SlotState>>({})
   const [swapSlotId, setSwapSlotId] = useState<string | null>(null)
@@ -402,6 +404,43 @@ export default function WorkoutView() {
                       onClose={() => setSwapSlotId(null)}
                     />
                   )}
+
+                  {/* Per-exercise persistent note */}
+                  {(() => {
+                    const exId = exercise?.id ?? ''
+                    const liveNote = exercises.find(e => e.id === exId)?.notes ?? ''
+                    const isEditing = editNoteExId === exId
+                    if (isEditing) return (
+                      <div style={styles.exNoteEdit}>
+                        <textarea
+                          style={styles.exNoteTextarea}
+                          autoFocus
+                          rows={3}
+                          value={editNoteText}
+                          onChange={e => setEditNoteText(e.target.value)}
+                          placeholder="Notes for this exercise (cues, form reminders…)"
+                        />
+                        <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end' }}>
+                          <button style={styles.exNoteCancel} onClick={() => setEditNoteExId(null)}>Cancel</button>
+                          <button style={styles.exNoteSave} onClick={async () => {
+                            await updateExerciseNote(exId, editNoteText.trim())
+                            setEditNoteExId(null)
+                          }}>Save</button>
+                        </div>
+                      </div>
+                    )
+                    return (
+                      <button style={styles.exNoteDisplay} onClick={() => {
+                        setEditNoteExId(exId)
+                        setEditNoteText(liveNote)
+                      }}>
+                        {liveNote
+                          ? <span style={styles.exNoteText}>{liveNote}</span>
+                          : <span style={styles.exNotePlaceholder}>Add exercise note…</span>}
+                        <span style={styles.exNoteEditHint}>Edit</span>
+                      </button>
+                    )
+                  })()}
 
                   <SetTable
                     slot={slot} exercise={exercise} rows={rows} prevHistory={prevHistory}
@@ -876,6 +915,14 @@ const styles: Record<string, React.CSSProperties> = {
   noteInput: { width: '100%', background: '#1f2937', border: '1px solid #374151', borderRadius: '6px', color: '#f9fafb', fontSize: '13px', padding: '8px', resize: 'none', fontFamily: 'inherit', boxSizing: 'border-box' as const },
   noteReadOnly: { fontSize: '13px', color: '#d1d5db', margin: 0, fontStyle: 'italic' },
   addSetBtn: { display: 'flex', alignItems: 'center', gap: '6px', background: 'none', border: '1px dashed #374151', borderRadius: '8px', padding: '8px 14px', color: '#6b7280', fontSize: '13px', cursor: 'pointer', alignSelf: 'flex-start' },
+  exNoteDisplay: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px', background: '#111827', border: '1px solid #1f2937', borderRadius: '8px', padding: '9px 12px', width: '100%', cursor: 'pointer', textAlign: 'left' },
+  exNoteText: { fontSize: '13px', color: '#d1d5db', lineHeight: 1.4, flex: 1 },
+  exNotePlaceholder: { fontSize: '13px', color: '#4b5563', fontStyle: 'italic', flex: 1 },
+  exNoteEditHint: { fontSize: '11px', color: '#6b7280', flexShrink: 0, marginTop: '1px' },
+  exNoteEdit: { background: '#111827', borderRadius: '8px', padding: '10px', display: 'flex', flexDirection: 'column', gap: '8px' },
+  exNoteTextarea: { width: '100%', background: '#1f2937', border: '1px solid #374151', borderRadius: '6px', color: '#f9fafb', fontSize: '13px', padding: '8px', resize: 'none', fontFamily: 'inherit', boxSizing: 'border-box' as const, lineHeight: 1.4 },
+  exNoteCancel: { background: 'none', border: '1px solid #374151', borderRadius: '6px', padding: '6px 12px', color: '#9ca3af', cursor: 'pointer', fontSize: '13px' },
+  exNoteSave: { background: '#3b82f6', border: 'none', borderRadius: '6px', padding: '6px 14px', color: '#fff', cursor: 'pointer', fontSize: '13px', fontWeight: 600 },
   // Rest overlay
   restOverlay: { position: 'fixed', bottom: '70px', left: 0, right: 0, display: 'flex', justifyContent: 'center', padding: '0 16px', zIndex: 20, pointerEvents: 'none' },
   restCard: { background: '#1f2937', border: '1px solid #374151', borderRadius: '16px', padding: '16px 20px', display: 'flex', alignItems: 'center', gap: '20px', maxWidth: '380px', width: '100%', boxShadow: '0 8px 32px #00000060', pointerEvents: 'all' },
